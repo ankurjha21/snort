@@ -1,0 +1,149 @@
+---
+
+- name: apt | Install honeymap dependencies
+  apt: name={{item}} state=present update_cache=yes cache_valid_time=3600
+  with_items:
+    - git
+    - mercurial
+    - make
+    - coffeescript
+    - libgeoip-dev
+    - supervisor
+  when: ansible_distribution == 'Debian' or ansible_distribution == 'Ubuntu'
+
+- name: yum | Install honeymap dependencies
+  yum: name={{item}} state=present update_cache=yes
+  with_items:
+    - "@Development tools"
+    - git
+    - mercurial
+    - make
+    - coffee-script
+    - GeoIP-devel
+    - supervisor
+  when: ansible_os_family == "RedHat" or ansible_distribution == 'CentOS' or ansible_distribution == 'Red Hat Enterprise Linux'
+
+## recent golang = switched to golang role
+## alternative? https://launchpad.net/~evarlast/+archive/ubuntu/golang1.4
+#- set_fact:
+#    architecture: 386
+#  when: ansible_architecture == 'i386'
+#- set_fact:
+#    architecture: amd64
+#  when: ansible_architecture == 'x86_64'
+#- stat: path=/usr/local/go{{ golang_v }}.linux-{{ architecture }}.tar.gz
+#  register: goarchive
+#- name: download recent golang
+#  get_url: url=https://storage.googleapis.com/golang/go{{ golang_v }}.linux-{{ architecture }}.tar.gz dest=/usr/local/go{{ golang_v }}.linux-{{ architecture }}.tar.gz mode=0440
+#  when: not goarchive.stat.exists
+#- stat: path=/usr/local/go
+#  register: godir
+#- command: tar xzf /usr/local/go{{ golang_v }}.linux-{{ architecture }}.tar.gz -C /usr/local/
+#  when: not godir.stat.exists
+#
+#- file: src=/usr/local/go/bin/{{ item }} dest=/usr/bin/{{ item }} state=link
+#  with_items:
+#    - go
+#    - godoc
+#    - gofmt
+
+- stat: path=/opt/honeymap
+  register: githoneymap
+- name: git clone honeymap
+  git:
+    repo=https://github.com/threatstream/honeymap.git
+    dest=/opt/honeymap
+  when: not githoneymap.stat.exists
+
+- stat: path={{ MHN_HOME }}/.adduserhoneymap
+  register: adduserhoneymap
+- name: generate random secret
+  shell: "openssl rand -base64 48 | sed 's@[=\\/\\+]@@g;'"
+  changed_when: false
+  register: rand
+- set_fact:
+    SECRET: "{{ rand.stdout }}"
+  when: not adduserhoneymap.stat.exists
+- name: add user to hpfeeds
+  command: '/opt/hpfeeds/env/bin/python /opt/hpfeeds/broker/add_user.py "honeymap" "{{ SECRET }}" "" "geoloc.events"'
+  when: not adduserhoneymap.stat.exists
+- name: Set up config.json
+  template: src=config.json
+    dest=/opt/honeymap/server/config.json
+    owner=0 group=0 mode=0644
+  when: not adduserhoneymap.stat.exists
+- file: path={{ MHN_HOME }}/.adduserhoneymap state=touch
+  when: not adduserhoneymap.stat.exists
+
+## FIXME! how to detect already run ?
+- stat: path=/opt/honeymap/client/js/honeymap.js
+  register: stgo
+- name: get and build honeymap server (go)
+  command: "{{ item }} chdir=/opt/honeymap/server"
+  with_items:
+    - go get
+    - go build
+  environment:
+    GOPATH: /opt/honeymap/server
+    GOBIN: /usr/local/go/bin
+  when: not stgo.stat.exists
+- name: build honeymap server (make)
+  command: "{{ item }} chdir=/opt/honeymap"
+  with_items:
+    - make
+  environment:
+    GOPATH: /opt/honeymap/server
+    GOBIN: /usr/local/go/bin
+  when: not stgo.stat.exists
+
+- name: ensure appropriate permissions on log directory
+  file: path=/var/log/mhn state=directory mode=755
+
+- name: Install hpfeeds virtualenv packages
+  pip: name={{item}} state=present
+    virtualenv=/opt/hpfeeds/env
+  with_items:
+    - GeoIP
+
+## use maxmind roles to get db in /var/maxmind
+#- file: src={{ item }} dest=/opt/ state=link
+#  with_fileglob:
+#    - /var/maxmind/*.dat
+- name: symlink maxmind roles files where expected
+  file: "src=/var/maxmind/{{ item }}.dat dest=/opt/{{ item }}.dat state=link"
+  with_items:
+    - GeoLiteCity
+    - GeoLiteCityv6
+    - GeoIPASNum
+
+- stat: path={{ MHN_HOME }}/.addusergeoloc
+  register: addusergeoloc
+- name: generate random secret
+  shell: "openssl rand -base64 48 | sed 's@[=\\/\\+]@@g;'"
+  changed_when: false
+  register: rand
+- set_fact:
+    SECRET: "{{ rand.stdout }}"
+  when: not addusergeoloc.stat.exists
+- name: add hpfeeds user for honeymap
+  command: '/opt/hpfeeds/env/bin/python /opt/hpfeeds/broker/add_user.py "geoloc" "{{ SECRET }}" "geoloc.events" "amun.events,dionaea.connections,dionaea.capture,glastopf.events,beeswarm.hive,kippo.sessions,cowrie.sessions,conpot.events,snort.alerts,kippo.alerts,cowrie.alerts,wordpot.events,shockpot.events,p0f.events,suricata.events,elastichoney.events"'
+  when: not addusergeoloc.stat.exists
+- name: Set up geoloc.json
+  template: src=geoloc.json
+    dest=/opt/hpfeeds/geoloc.json
+    owner=0 group=0 mode=0644
+  when: not addusergeoloc.stat.exists
+- file: path={{ MHN_HOME }}/.addusergeoloc state=touch
+  when: not addusergeoloc.stat.exists
+
+- name: set honeymap supervisor config
+  copy: "src=honeymap.conf dest={{ supervisor_confdir }}/honeymap.{{ supervisor_ext }} mode=0644"
+  notify:
+    - supervisor update
+
+- name: set geoloc supervisor config
+  copy: "src=geoloc.conf dest={{ supervisor_confdir }}/geoloc.{{ supervisor_ext }} mode=0644"
+  notify:
+    - supervisor update
+
+

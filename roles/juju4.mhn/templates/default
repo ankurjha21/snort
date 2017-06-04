@@ -1,0 +1,27 @@
+## /etc/nginx/sites-available/default
+server {
+{% if mhn_admin_web_listen is defined and mhn_admin_web_listen != '' %}
+    listen {{ mhn_admin_web_listen }}:{{ mhn_httpport }};
+{% else %}
+	listen {{ mhn_httpport }};
+{% endif %}
+    server_name  _;
+
+    location / { 
+        try_files \$uri @mhnserver; 
+    }
+
+    root /opt/www;
+    location @mhnserver {
+      include uwsgi_params;
+{% if ansible_os_family == "RedHat" or ansible_distribution == 'CentOS' or ansible_distribution == 'Red Hat Enterprise Linux' %}
+      uwsgi_pass 127.0.0.1:9999;
+{% else %}
+      uwsgi_pass unix:/tmp/uwsgi.sock;
+{% endif %}
+    }
+    location  /static {
+      alias {{ MHN_HOME }}/server/mhn/static;
+    }
+}
+

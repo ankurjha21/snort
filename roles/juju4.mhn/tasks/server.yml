@@ -1,0 +1,118 @@
+---
+
+- name: check role user exists
+  user: "name={{ mhn_user }} home={{ mhn_userdir }}"
+  become: yes
+
+- name: ensure traversal permissions on mhn userdir
+  file: dest={{ mhn_userdir }} mode=0711
+
+- include: debian.yml
+  when: ansible_distribution == 'Debian' or ansible_distribution == 'Ubuntu'
+
+- include: redhat.yml
+  when: ansible_os_family == "RedHat" or ansible_distribution == 'CentOS' or ansible_distribution == 'Red Hat Enterprise Linux'
+
+## server part
+
+- stat: path={{ MHN_HOME }}
+  register: mhnrepo
+## Ansible 2.0 on xenial: https://docs.ansible.com/ansible/become.html#becoming-an-unprivileged-user
+- name: Clone MHN repository
+  git:
+    repo=https://github.com/threatstream/mhn.git
+    dest={{ MHN_HOME }}
+  when: not mhnrepo.stat.exists
+  become: yes
+  become_user: "{{ mhn_user }}"
+
+## if exists, update. for git pull, need to stash local changes
+## FIXME! is it the right way to do minor update?
+- block:
+    - name: updating existing MHN
+      command: "{{ item }}"
+      args:
+        chdir: "{{ MHN_HOME }}"
+      with_items:
+        - git config --global user.email root@localhost
+## FIXME! stash not working. requiring merging of requirements.txt
+        - git stash
+        - git pull
+        - git stash pop
+      register: gitpull_result
+      changed_when: not ("'Already up-to-date.' in gitpull_result.stdout")
+  when: mhnrepo.stat.exists and 0 == 1
+
+- name: ensure mhn log dir exists
+  file: path=/var/log/mhn state=directory mode=0755
+
+- name: Common directories
+  file: "dest={{ item }} mode=0755 state=directory"
+  with_items:
+    - "{{ backupdir }}"
+    - "{{ scriptsdir }}"
+
+- name: Install MHN Server - hpfeeds
+  include: hpfeeds.yml
+- name: Install MHN Server - mnemosyne
+  include: mnemosyne.yml
+- name: Install MHN Server - honeymap
+  include: honeymap.yml
+- name: Install MHN Server - mhnserver
+  include: mhnserver.yml
+
+- include: hpfeeds-logger-json.yml
+  when: mhn_do_elk is defined and mhn_do_elk
+
+- include: splunk.yml
+  when: mhn_do_splunk is defined and mhn_do_splunk
+- include: arcsight.yml
+  when: mhn_do_arcsight is defined and mhn_do_arcsight
+- include: elk.yml
+  when: mhn_do_elk is defined and mhn_do_elk and mhn_elk_elasticserver != ''
+
+- block:
+    - file: dest=/etc/aide/aide.conf.d state=directory mode=0755
+    - name: add additional aide HIDS configuration
+      copy: src=99_aide_local_mhn dest=/etc/aide/aide.conf.d/99_aide_local_mhn mode=0644
+  when: ansible_distribution == 'Debian' or ansible_distribution == 'Ubuntu'
+
+
+- name: setup backup configuration
+  template: "src=mhn-backup.sh.j2 dest={{ scriptsdir }}/mhn-backup.sh mode=0755"
+- name: setup cron backup
+  cron: name="mhn-backup" minute="30" hour="3" weekday="0"
+    job="{{ scriptsdir }}/mhn-backup.sh > /dev/null 2>&1"
+    user=root
+    cron_file=ansible_mhn-backup
+
+- name: Update MHN_HOME in bashrc - root
+  lineinfile:
+    dest: "{{ item.d }}"
+    line: "{{ item.l }}"
+    regexp: "{{ item.r }}"
+    insertafter: EOF
+    state: present
+    create: False
+  with_items:
+    - { d: "/root/.bashrc", r: "^export MHN_HOME=", l: 'export MHN_HOME={{ MHN_HOME }}' }
+- stat: path="{{ MHN_HOME }}"
+  register: homeuser
+- name: Update MHN_HOME in bashrc - mhn_user
+  lineinfile:
+    dest: "{{ mhn_userdir }}/.bashrc"
+    regexp: "^export MHN_HOME="
+    line: "export MHN_HOME={{ MHN_HOME }}"
+    insertafter: EOF
+    state: present
+    create: False
+  when: homeuser.stat.exists
+
+- name: add mhn logrotate.d configuration
+  copy: src=logrotate-mhn dest=/etc/logrotate.d/mhn mode=0644 backup=yes
+- include: monitoring-nrpe.yml
+  when: mhn_monitoring_nrpe is defined and mhn_monitoring_nrpe
+
+- name: ensure supervisor service is enabled
+  service: name={{ supervisor_service }} enabled=yes
+

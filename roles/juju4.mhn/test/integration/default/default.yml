@@ -1,0 +1,10 @@
+---
+
+- hosts: all
+  vars:
+    - MHN_EMAIL: root@localhost
+    - MHN_PASS: root@localhost
+  roles:
+    - juju4.maxmind
+    - juju4.mhn
+

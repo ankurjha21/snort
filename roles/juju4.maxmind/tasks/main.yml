@@ -1,0 +1,82 @@
+---
+
+#- include: root-password-expired.yml
+
+## official packages are handling one or two db
+- name: apt | uninstall maxmind package to avoid conflicts
+  apt: name={{ item }} state=absent
+  with_items:
+    - geoip-database
+    - geoip-database-extra
+  when: ansible_distribution == 'Debian' or ansible_distribution == 'Ubuntu'
+
+- name: yum | uninstall maxmind package to avoid conflicts
+  yum: name={{ item }} state=absent
+  with_items:
+    - GeoIP-GeoLite-data
+    - geoipupdate
+    - GeoIP-update
+  when: ansible_os_family == "RedHat" or ansible_distribution == 'CentOS' or ansible_distribution == 'Red Hat Enterprise Linux'
+
+## hash are not really useful as files are updated regulary but if needed.
+- name: Maxmind directory
+  file: "path={{ maxmind_rootdir }} mode=0755 owner=root state=directory"
+
+## FIXME! not idempotent
+- name: Get Maxmind databases
+  get_url:
+    url: "{{ item }}"
+    dest: "{{ maxmind_rootdir }}/{{ item | basename }}"
+    mode: '0444'
+  with_items:
+    - http://geolite.maxmind.com/download/geoip/database/GeoLiteCountry/GeoIP.dat.gz
+    - http://geolite.maxmind.com/download/geoip/database/GeoIPv6.dat.gz
+    - http://geolite.maxmind.com/download/geoip/database/GeoLiteCity.dat.gz
+    - http://geolite.maxmind.com/download/geoip/database/GeoLiteCityv6-beta/GeoLiteCityv6.dat.gz
+    - http://geolite.maxmind.com/download/geoip/database/asnum/GeoIPASNum.dat.gz
+    - http://geolite.maxmind.com/download/geoip/database/asnum/GeoIPASNumv6.dat.gz
+    - http://geolite.maxmind.com/download/geoip/database/GeoLite2-City.mmdb.gz
+    - http://geolite.maxmind.com/download/geoip/database/GeoLite2-Country.mmdb.gz
+
+- name: extract db
+  command: "gunzip {{ maxmind_rootdir }}/{{ item }}.gz creates={{ maxmind_rootdir }}/{{ item }}"
+##
+#  unarchive:
+#    src: "{{ maxmind_rootdir }}/{{ item }}.gz"
+#    dest: "{{ maxmind_rootdir }}"
+#    remote_src: true
+  with_items:
+    - GeoIP.dat
+    - GeoIPv6.dat
+    - GeoLiteCity.dat
+    - GeoLiteCityv6.dat
+    - GeoIPASNum.dat
+    - GeoIPASNumv6.dat
+    - GeoLite2-City.mmdb
+    - GeoLite2-Country.mmdb
+
+- name: symlink GeoIP dir to /usr/share/GeoIP
+  file: "src={{ maxmind_rootdir }} dest=/usr/share/GeoIP state=link"
+- name: symlink GeoIP dir to /usr/local/share/GeoIP
+  file: "src=/usr/share/GeoIP dest=/usr/local/share/GeoIP state=link"
+
+- name: Add script to update maxmind
+  template: src=update-maxmind.sh.j2 dest=/usr/local/bin/update-maxmind.sh mode=0755
+- name: apt | ensure cron is installed
+  apt: name=cron state=present
+  when: ansible_distribution == 'Debian' or ansible_distribution == 'Ubuntu'
+- name: yum | ensure cron is installed
+  yum: name=crontabs state=present
+  when: ansible_os_family == "RedHat" or ansible_distribution == 'CentOS' or ansible_distribution == 'Red Hat Enterprise Linux'
+
+- name: cron task to update daily
+  cron: name="maxmind autoupdate" minute=0 hour=0
+        user=root job="/usr/local/bin/update-maxmind.sh > /tmp/update_maxmind.log 2>&1"
+        cron_file=ansible_maxmind-update
+
+- block:
+    - file: dest=/etc/aide/aide.conf.d state=directory mode=0755
+    - name: add additional aide HIDS configuration
+      template: src=99_aide_local_maxmind.j2 dest=/etc/aide/aide.conf.d/99_aide_local_maxmind mode=0644
+  when: ansible_distribution == 'Debian' or ansible_distribution == 'Ubuntu'
+

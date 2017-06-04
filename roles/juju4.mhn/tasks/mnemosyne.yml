@@ -1,0 +1,73 @@
+---
+
+- name: apt | Install mnemosyne dependencies
+  apt: name={{item}} state=present update_cache=yes cache_valid_time=3600
+  with_items:
+    - python-pip
+    - python-dev
+    - git
+    - python-virtualenv
+    - supervisor
+  when: ansible_distribution == 'Debian' or ansible_distribution == 'Ubuntu'
+
+- name: yum | Install mnemosyne dependencies
+  yum: name={{item}} state=present update_cache=yes
+  with_items:
+    - "@Development tools"
+    - python-pip
+    - python-devel
+    - python-virtualenv
+    - git
+    - supervisor
+  when: ansible_os_family == "RedHat" or ansible_distribution == 'CentOS' or ansible_distribution == 'Red Hat Enterprise Linux'
+
+- name: install mongodb
+  include: mongodb.yml
+
+- stat: path=/opt/mnemosyne
+  register: gitmnemosyne
+- name: git clone mnemosyne
+  git:
+    repo=https://github.com/threatstream/mnemosyne.git
+    dest=/opt/mnemosyne
+  when: not gitmnemosyne.stat.exists
+
+## FIXME! https://github.com/gevent/gevent/issues/513
+- name: fix PROTOCOL_SSLv3 error in gevent
+  replace: dest=/opt/mnemosyne/requirements.txt regexp='^gevent==.*' replace='gevent>=1.0.2'
+
+## FIXME! seems to be run/changed each time?
+## https://github.com/ansible/ansible/issues/6191
+- name: Install mnemosyne virtualenv
+  pip: requirements=/opt/mnemosyne/requirements.txt
+    virtualenv=/opt/mnemosyne/env
+
+- stat: path={{ MHN_HOME }}/.addusermnemosyne
+  register: addusermnemosyne
+- name: generate random secret
+  shell: "openssl rand -base64 48 | sed 's@[=\\/\\+]@@g;'"
+  changed_when: false
+  register: rand
+- set_fact:
+    SECRET: "{{ rand.stdout }}"
+  when: not addusermnemosyne.stat.exists
+- name: ensure mongdb is active
+  service: name={{ mongodb_svc }} state=started
+- name: add user to hpfeeds
+  command: '/opt/hpfeeds/env/bin/python /opt/hpfeeds/broker/add_user.py "{{ IDENT }}" "{{ SECRET }}" "" "{{ CHANNELS }}"'
+  when: not addusermnemosyne.stat.exists
+- name: Set up mnemosyne config
+  template: src=mnemosyne.cfg
+    dest=/opt/mnemosyne/mnemosyne.cfg
+    owner=0 group=0 mode=0644
+  when: not addusermnemosyne.stat.exists
+- file: path={{ MHN_HOME }}/.addusermnemosyne state=touch
+  when: not addusermnemosyne.stat.exists
+
+- file: path=/var/log/mhn state=directory mode=755
+
+- name: set mnemosyne supervisor config
+  copy: "src=mnemosyne.conf dest={{ supervisor_confdir }}/mnemosyne.{{ supervisor_ext }} mode=0644"
+  notify:
+    - supervisor update
+
